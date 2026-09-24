@@ -1,4 +1,4 @@
-// tasks 5 and 6. the re-issued mint and the full confidential lifecycle.
+// the re-issued mint and the full confidential lifecycle
 
 use solana_address::Address;
 use solana_keypair::Keypair;
@@ -27,7 +27,7 @@ struct World {
     bob_keys: Keys,
 }
 
-// mint B, two configured and approved accounts, alice holding public tokens.
+// mint B with two approved accounts, alice holding public tokens
 async fn world(alice_tokens: u64, max_pending: Option<u64>) -> World {
     let rpc = rpc();
     let payer = funded_payer().await;
@@ -85,7 +85,7 @@ async fn reissued_mint_carries_seizure_and_manual_approve() {
     let who: Option<Address> = delegate.delegate.into();
     assert_eq!(who, Some(seizer.pubkey()));
 
-    // approve_policy = manual. this is the flag that means it.
+    // this flag is what approve_policy = manual means
     let ct = state.get_extension::<ConfidentialTransferMint>().unwrap();
     assert!(!bool::from(ct.auto_approve_new_accounts));
 }
@@ -101,12 +101,12 @@ async fn anyone_creates_the_ata_but_only_the_owner_configures_it() {
     let alice = Keypair::new();
     let ata = ata(&mint, &alice.pubkey());
 
-    // payer makes alice's account and alice never signs anything
+    // alice never signs
     create_ata(&rpc, &payer, &mint, &alice.pubkey()).await.unwrap();
     assert!(rpc.get_account(&ata).await.is_ok());
 
-    // but the payer can't configure it. the ElGamal key comes out of the owner
-    // signing, so there is nothing the payer could even put in there.
+    // but can't configure it. the key comes from the owner signing, so there's
+    // nothing the payer could put in there.
     let payer_keys = confidential::keys(&payer, &ata).unwrap();
     assert!(
         confidential::configure(&rpc, &payer, &mint, &ata, &payer, &payer_keys, None)
@@ -138,7 +138,7 @@ async fn manual_approve_gates_the_account() {
     confidential::configure(&rpc, &payer, &mint, &ata, &alice, &keys, None).await.unwrap();
     mint_to(&rpc, &payer, &mint, &ata, &payer, 1_000).await.unwrap();
 
-    // configured but not approved, so the confidential side is closed
+    // configured but not approved yet
     assert!(
         confidential::deposit(&rpc, &payer, &mint, &ata, &alice, 500).await.is_err(),
         "unapproved account should not be able to deposit"
@@ -157,10 +157,10 @@ async fn deposit_lands_in_pending_and_apply_moves_it() {
         .await
         .unwrap();
 
-    // public balance went down straight away
+    // public balance drops right away
     assert_eq!(inspect::balance(&rpc, &w.alice_ata).await.unwrap(), 400);
 
-    // but it's in pending, not available. available is still zero.
+    // but it went to pending, available is still zero
     assert_eq!(
         confidential::pending_counter(&rpc, &w.alice_ata).await.unwrap(),
         1
@@ -176,7 +176,7 @@ async fn deposit_lands_in_pending_and_apply_moves_it() {
         .await
         .unwrap();
 
-    // now it's spendable, and the counter reset
+    // now it's spendable and the counter reset
     assert_eq!(
         confidential::available_balance(&rpc, &w.alice_ata, &w.alice_keys)
             .await
@@ -192,7 +192,7 @@ async fn deposit_lands_in_pending_and_apply_moves_it() {
 #[tokio::test]
 async fn pending_credit_counter_boundary() {
     let rpc = rpc();
-    // cap it at 2 so the boundary is cheap to hit
+    // cap of 2 so the boundary is cheap to hit
     let w = world(1_000, Some(2)).await;
 
     // one under the cap
@@ -202,8 +202,7 @@ async fn pending_credit_counter_boundary() {
         1
     );
 
-    // exactly at the cap. the check on chain is `new > maximum`, so landing on
-    // the maximum is fine. this is the one I had backwards at first.
+    // exactly at the cap. check is `new > maximum` so landing on it is fine.
     confidential::deposit(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, 100).await.unwrap();
     assert_eq!(
         confidential::pending_counter(&rpc, &w.alice_ata).await.unwrap(),
@@ -218,7 +217,7 @@ async fn pending_credit_counter_boundary() {
         "third deposit should blow the counter"
     );
 
-    // apply is the release valve, not a workaround
+    // apply resets it
     confidential::apply_pending(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, &w.alice_keys)
         .await
         .unwrap();
@@ -249,7 +248,7 @@ async fn full_lifecycle_deposit_transfer_withdraw() {
     .await
     .unwrap();
 
-    // nothing public moved. that's the whole point.
+    // nothing public moved
     assert_eq!(inspect::balance(&rpc, &w.alice_ata).await.unwrap(), 200);
     assert_eq!(inspect::balance(&rpc, &w.bob_ata).await.unwrap(), 0);
 
@@ -260,7 +259,7 @@ async fn full_lifecycle_deposit_transfer_withdraw() {
         500
     );
 
-    // bob's 300 is in pending. he has to apply before he can do anything.
+    // bob's 300 is in pending until he applies
     confidential::apply_pending(&rpc, &w.payer, &w.mint, &w.bob_ata, &w.bob, &w.bob_keys)
         .await
         .unwrap();
@@ -275,7 +274,7 @@ async fn full_lifecycle_deposit_transfer_withdraw() {
         .await
         .unwrap();
 
-    // back out in public where anyone can see it
+    // back out in public
     assert_eq!(inspect::balance(&rpc, &w.bob_ata).await.unwrap(), 300);
     let _ = DECIMALS;
 }
@@ -287,8 +286,8 @@ async fn withdraw_before_apply_pending_fails() {
 
     confidential::deposit(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, 500).await.unwrap();
 
-    // the money is visibly in the account and still not spendable. withdraw
-    // builds its proof off the AVAILABLE ciphertext, which is still zero.
+    // the money is in the account and still not spendable. withdraw proves
+    // against available, which is still zero.
     assert!(
         confidential::withdraw(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, &w.alice_keys, 500)
             .await
@@ -315,8 +314,8 @@ async fn withdraw_boundary() {
         .await
         .unwrap();
 
-    // one over available. fails client side in proof generation, because there
-    // is no valid range proof for a negative remainder.
+    // one over. fails in proof generation, no range proof for a negative
+    // remainder.
     assert!(
         confidential::withdraw(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, &w.alice_keys, 501)
             .await
@@ -346,7 +345,7 @@ async fn permanent_delegate_seizes_public_but_not_confidential() {
     let w = world(1_000, None).await;
     
 
-    // baseline: the seizure authority can take public tokens without asking
+    // the seizure authority can take public tokens without asking
     fee_transfer::send_plain(
         &rpc, &w.payer, &w.mint, &w.alice_ata, &w.bob_ata, &w.seizer, 200,
     )
@@ -354,15 +353,15 @@ async fn permanent_delegate_seizes_public_but_not_confidential() {
     .unwrap();
     assert_eq!(inspect::balance(&rpc, &w.alice_ata).await.unwrap(), 800);
 
-    // now alice moves everything into the confidential system
+    // alice moves it all into the confidential system
     confidential::deposit(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, 800).await.unwrap();
     confidential::apply_pending(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, &w.alice_keys)
         .await
         .unwrap();
     assert_eq!(inspect::balance(&rpc, &w.alice_ata).await.unwrap(), 0);
 
-    // this is task 8, as a test. the permanent delegate has no instruction that
-    // reaches a ciphertext, and there is nothing public left to take.
+    // the permanent delegate has no instruction that reaches a ciphertext, and
+    // there's nothing public left to take.
     assert!(
         fee_transfer::send_plain(
             &rpc, &w.payer, &w.mint, &w.alice_ata, &w.bob_ata, &w.seizer, 1,
@@ -372,7 +371,7 @@ async fn permanent_delegate_seizes_public_but_not_confidential() {
         "seizure should be defeated once the balance is confidential"
     );
 
-    // the 800 is still right there, alice just has it somewhere the issuer can't
+    // the 800 is still there, just somewhere the issuer can't reach
     assert_eq!(
         confidential::available_balance(&rpc, &w.alice_ata, &w.alice_keys)
             .await
@@ -393,8 +392,7 @@ async fn freezing_shuts_the_whole_confidential_path() {
 
     kyc::revoke_kyc(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.payer).await.unwrap();
 
-    // freeze is the lever that still works. it contains the money, it doesn't
-    // hand it over, which is the difference the writeup is about.
+    // freeze still works. it traps the money, it doesn't hand it over.
     assert!(confidential::deposit(&rpc, &w.payer, &w.mint, &w.alice_ata, &w.alice, 100).await.is_err());
     assert!(
         confidential::transfer(

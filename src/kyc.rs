@@ -1,11 +1,5 @@
-// task 4. the mint says every new account is frozen. this is how one account
-// gets let through once its KYC clears.
-//
-// two levers, easy to mix up:
-//   thaw          -> one account, right now, signed by the freeze authority
-//   default state -> what the NEXT account looks like when it's created
-// thawing somebody doesn't touch the mint, and changing the mint default doesn't
-// retroactively unfreeze anybody.
+// two separate levers. thaw is one account right now. default state is what the
+// next account gets. neither one touches the other.
 
 use std::sync::Arc;
 
@@ -51,7 +45,7 @@ pub async fn revoke_kyc(
     send(rpc, payer, &[ix], &[payer, freeze_authority]).await
 }
 
-// the mint level lever. only changes what new accounts look like.
+// only affects accounts created after this
 pub async fn set_default_state(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,

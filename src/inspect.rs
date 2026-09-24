@@ -1,6 +1,5 @@
-// task 3. everything that reads chain state goes through StateWithExtensions.
-// nothing in here calls Mint::unpack or Account::unpack, because those only see
-// the first 82 bytes and would miss every extension on the account.
+// every read goes through StateWithExtensions. a plain unpack only sees the
+// first 82 bytes and misses every extension.
 
 use std::sync::Arc;
 
@@ -13,7 +12,7 @@ use spl_token_2022_interface::{
     state::{Account, AccountState, Mint},
 };
 
-// what the mint would charge right now, at this epoch.
+// what the mint charges at this epoch
 pub async fn epoch_fee(rpc: &Arc<RpcClient>, mint: &Address, amount: u64) -> anyhow::Result<u64> {
     let account = rpc.get_account(mint).await?;
     let state = StateWithExtensions::<Mint>::unpack(&account.data)?;

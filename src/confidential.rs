@@ -1,19 +1,6 @@
-// task 6. the whole confidential lifecycle, in the order it has to happen:
-//
-//   create ATA        anyone can pay, the owner doesn't even sign
-//   Reallocate        make room for the ConfidentialTransferAccount extension
-//   ConfigureAccount  owner only, nobody else can do it
-//   ApproveAccount    the issuer, because this mint is approve_policy = manual
-//   Deposit           public balance -> PENDING
-//   ApplyPending      pending -> AVAILABLE
-//   Transfer          available -> the other guy's PENDING
-//   ApplyPending      again, on the receiving side
-//   Withdraw          available -> public balance
-//
-// the two apply steps are what people skip. a deposit or an incoming transfer
-// lands in pending, and pending is not spendable. withdraw builds its proof off
-// the AVAILABLE ciphertext, so skipping apply means proving something about the
-// wrong number and it falls over before it's even sent.
+// deposits and incoming transfers land in pending, which isn't spendable.
+// apply_pending moves it to available. skip that and withdraw proves the wrong
+// number and dies before it's even sent.
 
 use std::sync::Arc;
 
@@ -44,9 +31,8 @@ use crate::{
     send, DECIMALS,
 };
 
-// both keys come out of the owner signing a fixed message, so the owner can
-// always regenerate them and nothing has to be stored. that's also the
-// structural reason ConfigureAccount is owner only: nobody else can make these.
+// derived from the owner signing a message, which is why only the owner can
+// configure an account and why nothing has to be stored.
 pub struct Keys {
     pub elgamal: ElGamalKeypair,
     pub ae: AeKey,
@@ -58,8 +44,7 @@ pub fn keys(owner: &Keypair, account: &Address) -> anyhow::Result<Keys> {
     Ok(Keys { elgamal, ae })
 }
 
-// pull the confidential half of a token account out. copied out rather than
-// borrowed because the unpacked view borrows the raw bytes.
+// copied out, not borrowed, because the unpacked view borrows the raw bytes.
 async fn ct_account(
     rpc: &Arc<RpcClient>,
     account: &Address,
@@ -69,11 +54,8 @@ async fn ct_account(
     Ok(*state.get_extension::<ConfidentialTransferAccount>()?)
 }
 
-// the ATA program sizes the account for the mint's REQUIRED extensions only, and
-// ConfidentialTransferAccount is optional, so it isn't in there. the token-2022
-// source says it outright: "The caller is expected to use the Reallocate
-// instruction to ensure there is sufficient room". skip this and ConfigureAccount
-// just says InvalidAccountData and leaves you guessing.
+// an ATA isn't sized for optional extensions, so make room first. without this
+// ConfigureAccount just says InvalidAccountData.
 pub async fn make_room(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -94,11 +76,9 @@ pub async fn make_room(
 }
 
 
-// a transfer's three proofs, and a withdraw's two, are way past the 1232 byte
-// transaction limit if you inline them. 2284 bytes for one withdraw. so each
-// proof gets verified into its own throwaway account first, the token
-// instruction just points at those accounts, and then they get closed and the
-// rent comes back.
+// one withdraw with its proofs inline is 2284 bytes and the limit is 1232. so
+// each proof gets verified into a throwaway account and the instruction points
+// at that instead.
 async fn verify_into_context<T, U>(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -128,8 +108,7 @@ where
         proof_data,
     );
 
-    // the create and the verify go in separate transactions, because the proof
-    // data itself is what's too big to share a transaction with anything else.
+    // separate transactions, the proof data is the thing that's too big
     send(rpc, payer, &[create], &[payer, &context]).await?;
     send(rpc, payer, &[verify], &[payer]).await?;
     Ok(context)
@@ -164,8 +143,7 @@ pub async fn configure(
 ) -> anyhow::Result<()> {
     make_room(rpc, payer, mint, account, owner).await?;
 
-    // proves the ElGamal pubkey going into the account is well formed. it's
-    // generated from the secret key, so only the owner can produce it.
+    // built from the secret key, so only the owner can produce it
     let proof = build_pubkey_validity_proof_data(&keys.elgamal)
         .map_err(|e| anyhow::anyhow!("pubkey validity proof failed: {e}"))?;
 
@@ -263,8 +241,7 @@ pub async fn transfer(
     let ct = ct_account(rpc, from).await?;
     let info = TransferAccountInfo::new(&ct);
 
-    // three proofs: equality, ciphertext validity, range. generated client side
-    // off the current available balance ciphertext.
+    // equality, ciphertext validity, range
     let proofs = info
         .generate_split_transfer_proof_data(amount, &keys.elgamal, &keys.ae, to_elgamal, None)
         .map_err(|e| anyhow::anyhow!("transfer proof generation failed: {e}"))?;

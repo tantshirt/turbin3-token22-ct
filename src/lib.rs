@@ -25,8 +25,7 @@ pub fn rpc() -> Arc<RpcClient> {
     ))
 }
 
-// build, sign, send. every module goes through this instead of repeating the
-// blockhash dance six times.
+// build, sign, send. saves repeating the blockhash dance in every module.
 pub async fn send<S: Signers + ?Sized>(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -44,9 +43,8 @@ pub async fn send<S: Signers + ?Sized>(
     Ok(())
 }
 
-// the ATA program's own client crate is on a different solana-instruction line
-// than everything else here, so the address and the instruction are built by
-// hand. it's a PDA and a one byte instruction, it's not worth a dependency fight.
+// the ATA client crate is on a different solana-instruction line than the rest
+// of this, and it's a PDA plus a one byte instruction, so just build it here.
 pub const ATA_PROGRAM: Address =
     solana_address::address!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
@@ -62,8 +60,7 @@ pub fn ata(mint: &Address, owner: &Address) -> Address {
     .0
 }
 
-// anybody can pay to create somebody else's token account. the owner doesn't
-// sign. that's the contrast with ConfigureAccount later.
+// anybody can pay for somebody else's account. the owner never signs.
 pub async fn create_ata(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -136,7 +133,7 @@ pub async fn burn(
     send(rpc, payer, &[ix], &[payer, owner]).await
 }
 
-// decommissioning the mint. only works once the supply is zero.
+// only works once the supply is zero
 pub async fn close_mint(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,

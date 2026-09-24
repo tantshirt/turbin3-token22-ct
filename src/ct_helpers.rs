@@ -1,15 +1,8 @@
-// these three structs are lifted from spl-token-client 0.19.1,
-// src/zk_proofs/confidential_transfer.rs.
-//
-// i didn't want to copy them. the problem is that crate cannot be built at any
-// published version right now: it wants spl-memo-interface 2.1, which wants
-// solana-instruction 3.4, and its own source needs solana-transaction 3.x, and
-// no solana-rpc-client release satisfies both. upstream main is the same. these
-// helpers used to live in spl-token-2022 and got moved into the client, so
-// there is nowhere else to get them.
-//
-// all they do is pull the ciphertexts off the account and hand them to
-// spl-token-confidential-transfer-proof-generation in the right shape.
+// copied from spl-token-client 0.19.1, src/zk_proofs/confidential_transfer.rs.
+// that crate won't build at any published version (spl-memo-interface 2.1 wants
+// solana-instruction 3.4, its own source wants solana-transaction 3.x, nothing
+// satisfies both) and these used to live in spl-token-2022 before they moved.
+// all they do is hand the account's ciphertexts to the proof generator.
 
 #![allow(dead_code)]
 

@@ -1,5 +1,4 @@
-// task 4. thawing one account after KYC, and proving it's a different lever from
-// the mint level default state.
+// thawing one account, and proving it's a different lever from the mint default
 
 use solana_address::Address;
 use solana_keypair::Keypair;
@@ -38,7 +37,7 @@ async fn new_accounts_are_born_frozen() {
     let account = ata(&mint, &alice.pubkey());
     create_ata(&rpc, &payer, &mint, &alice.pubkey()).await.unwrap();
 
-    // nobody sent a Freeze instruction. DefaultAccountState did it.
+    // nobody sent a Freeze, DefaultAccountState did it
     assert!(inspect::is_frozen(&rpc, &account).await.unwrap());
 }
 
@@ -50,16 +49,16 @@ async fn frozen_then_thawed_then_frozen_again() {
     let account = ata(&mint, &alice.pubkey());
     create_ata(&rpc, &payer, &mint, &alice.pubkey()).await.unwrap();
 
-    // frozen: can't receive anything
+    // frozen, can't receive
     assert!(mint_to(&rpc, &payer, &mint, &account, &payer, 100).await.is_err());
 
-    // KYC clears, freeze authority thaws this one account
+    // KYC clears
     kyc::approve_kyc(&rpc, &payer, &mint, &account, &payer).await.unwrap();
     assert!(!inspect::is_frozen(&rpc, &account).await.unwrap());
     mint_to(&rpc, &payer, &mint, &account, &payer, 100).await.unwrap();
     assert_eq!(inspect::balance(&rpc, &account).await.unwrap(), 100);
 
-    // and it can go back the other way
+    // and back the other way
     kyc::revoke_kyc(&rpc, &payer, &mint, &account, &payer).await.unwrap();
     assert!(inspect::is_frozen(&rpc, &account).await.unwrap());
     assert!(mint_to(&rpc, &payer, &mint, &account, &payer, 100).await.is_err());
@@ -88,8 +87,7 @@ async fn thawing_one_account_leaves_the_mint_alone() {
     create_ata(&rpc, &payer, &mint, &alice.pubkey()).await.unwrap();
     kyc::approve_kyc(&rpc, &payer, &mint, &alice_ata, &payer).await.unwrap();
 
-    // this is the "separate from any mint level change" clause. alice got
-    // through, the mint still says frozen, and bob shows up frozen like always.
+    // alice got through but the mint still says frozen, so bob shows up frozen
     let raw = rpc.get_account(&mint).await.unwrap();
     let state = StateWithExtensions::<Mint>::unpack(&raw.data).unwrap();
     let default_state = state.get_extension::<DefaultAccountState>().unwrap();
@@ -114,12 +112,11 @@ async fn changing_the_mint_default_is_not_retroactive() {
         .await
         .unwrap();
 
-    // bob is new, so bob is fine
+    // bob is new so bob is fine
     let bob_ata = ata(&mint, &bob.pubkey());
     create_ata(&rpc, &payer, &mint, &bob.pubkey()).await.unwrap();
     assert!(!inspect::is_frozen(&rpc, &bob_ata).await.unwrap());
 
-    // alice already existed, so alice is still frozen. the mint default only
-    // ever decides what the NEXT account looks like.
+    // alice already existed so alice is still frozen
     assert!(inspect::is_frozen(&rpc, &alice_ata).await.unwrap());
 }

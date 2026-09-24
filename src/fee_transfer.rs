@@ -1,10 +1,6 @@
-// task 2. transfer_checked_with_fee, and the fee comes from calculate_epoch_fee
-// every single time.
-//
-// it can't be cached. the program recomputes the fee on chain with its own Clock
-// and rejects the transaction if your number doesn't match. TransferFeeConfig
-// actually holds two rates, an older and a newer one, and swaps between them at
-// an epoch boundary, so a stored rate goes stale the moment the issuer changes it.
+// the fee gets recomputed every time instead of cached. TransferFeeConfig holds
+// an old rate and a new one and swaps at an epoch boundary, and the program
+// checks your number against its own.
 
 use std::sync::Arc;
 
@@ -16,7 +12,7 @@ use spl_token_2022_interface::extension::transfer_fee;
 
 use crate::{inspect, send, DECIMALS};
 
-// what this transfer costs right now. returns (fee, what the receiver gets).
+// (fee, what the receiver actually gets)
 pub async fn quote(rpc: &Arc<RpcClient>, mint: &Address, amount: u64) -> anyhow::Result<(u64, u64)> {
     let fee = inspect::epoch_fee(rpc, mint, amount).await?;
     Ok((fee, amount - fee))
@@ -36,8 +32,7 @@ pub async fn send_with_fee(
     Ok(fee)
 }
 
-// same thing but you pass the fee yourself. only the boundary tests use this,
-// to prove the program rejects a number that doesn't match.
+// pass your own fee. only the boundary tests use this.
 pub async fn send_with_explicit_fee(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -62,7 +57,7 @@ pub async fn send_with_explicit_fee(
     send(rpc, payer, &[ix], &[payer, owner]).await
 }
 
-// the ordinary instruction, for the test that shows what the difference is.
+// the plain instruction, for the test that shows what it does differently
 pub async fn send_plain(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,

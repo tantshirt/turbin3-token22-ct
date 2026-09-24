@@ -1,5 +1,4 @@
-// task 2, plus the fee boundaries. the operators here were read off the
-// spl-token-2022 source, not guessed, and each one says which way it goes.
+// fee boundaries. each one says which comparison it pinned.
 
 use solana_address::Address;
 use solana_keypair::Keypair;
@@ -33,7 +32,7 @@ async fn setup(amount: u64) -> (Keypair, Address, Keypair, Address, Keypair, Add
     create_ata(&rpc, &payer, &mint, &alice.pubkey()).await.unwrap();
     create_ata(&rpc, &payer, &mint, &bob.pubkey()).await.unwrap();
 
-    // every account is born frozen, so KYC both of them before anything moves
+    // born frozen, so KYC both before anything moves
     kyc::approve_kyc(&rpc, &payer, &mint, &alice_ata, &payer).await.unwrap();
     kyc::approve_kyc(&rpc, &payer, &mint, &bob_ata, &payer).await.unwrap();
 
@@ -58,8 +57,7 @@ async fn transfer_charges_the_epoch_fee() {
             .unwrap();
     assert_eq!(charged, quoted);
 
-    // the fee doesn't vanish, it sits withheld on the destination until the
-    // issuer sweeps it. that's the "issuer revenue" part.
+    // the fee sits withheld on the destination until the issuer sweeps it
     assert_eq!(inspect::balance(&rpc, &bob_ata).await.unwrap(), 9_500);
     assert_eq!(inspect::balance(&rpc, &alice_ata).await.unwrap(), 90_000);
 }
@@ -72,11 +70,10 @@ async fn maximum_fee_caps_the_percentage() {
     // under the cap: plain 5 percent
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 10_000).await.unwrap(), 500);
 
-    // exactly at the cap. 5 percent of 20000 is 1000, which is maximum_fee.
+    // exactly at the cap
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 20_000).await.unwrap(), MAX_FEE);
 
-    // one over. raw would be 1001, the cap is cmp::min so it binds strictly
-    // above maximum_fee and we get 1000 back.
+    // one over. cmp::min, so it binds strictly above maximum_fee.
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 20_001).await.unwrap(), MAX_FEE);
 }
 
@@ -88,11 +85,11 @@ async fn fee_rounds_up_never_to_zero() {
     // zero short circuits before any math
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 0).await.unwrap(), 0);
 
-    // 5 percent of 1 is 0.05. it's ceil_div, not floor, so you still pay 1.
-    // if this floored you could move any amount for free one unit at a time.
+    // ceil_div not floor. if it floored you could move money one unit at a time
+    // for free.
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 1).await.unwrap(), 1);
 
-    // 5 percent of 20 is exactly 1, the first amount where ceil and floor agree
+    // first amount where ceil and floor agree
     assert_eq!(inspect::epoch_fee(&rpc, &mint, 20).await.unwrap(), 1);
 }
 
@@ -104,8 +101,7 @@ async fn wrong_fee_is_rejected_both_directions() {
     let amount = 10_000;
     let right = inspect::epoch_fee(&rpc, &mint, amount).await.unwrap();
 
-    // the check on chain is `calculated_fee != fee`, so it's tight on both
-    // sides. you can't underpay and you can't overpay either.
+    // the check is `!=`, so you can't overpay either
     for wrong in [right - 1, right + 1] {
         let err = fee_transfer::send_with_explicit_fee(
             &rpc, &payer, &mint, &alice_ata, &bob_ata, &alice, amount, wrong,
@@ -127,18 +123,15 @@ async fn plain_transfer_checked_hides_the_fee() {
     let rpc = rpc();
     let (payer, mint, alice, alice_ata, _bob, bob_ata) = setup(100_000).await;
 
-    // this is the actual difference, and it surprised me. transfer_checked is
-    // NOT rejected on a fee mint. it goes through and quietly takes the fee
-    // anyway, so the caller sends 10000 and the receiver gets 9500 without ever
-    // having said they knew about it.
+    // transfer_checked isn't rejected on a fee mint. it goes through and takes
+    // the fee anyway, so the caller never had to know there was one.
     fee_transfer::send_plain(&rpc, &payer, &mint, &alice_ata, &bob_ata, &alice, 10_000)
         .await
         .unwrap();
     assert_eq!(inspect::balance(&rpc, &bob_ata).await.unwrap(), 9_500);
 
-    // transfer_checked_with_fee is the one that makes you state the number up
-    // front and fails if you got it wrong. same money moves, but a client that
-    // used a stale rate finds out here instead of shipping a wrong receipt.
+    // with_fee makes you state the number and fails if it's wrong. same money
+    // moves, but a stale rate gets caught here.
     let fee = inspect::epoch_fee(&rpc, &mint, 10_000).await.unwrap();
     fee_transfer::send_with_explicit_fee(
         &rpc, &payer, &mint, &alice_ata, &bob_ata, &alice, 10_000, fee,

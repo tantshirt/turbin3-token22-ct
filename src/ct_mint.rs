@@ -1,15 +1,8 @@
-// task 5. re-issue the mint, now carrying a seizure authority and confidential
-// transfers.
+// has to be a second mint. the extension list is locked in at InitializeMint so
+// confidential transfers can't be added to mint A after the fact.
 //
-// it has to be a second mint. the extension list is fixed at InitializeMint, so
-// confidential transfers can't be bolted onto the mint from task 1 later. that
-// is the gap the assignment is pointing at, and it's why the word is "re-issue".
-//
-// this one deliberately does NOT carry the transfer fee. the moment a mint has
-// both a fee and confidential transfers, token-2022 also wants a
-// ConfidentialTransferFeeConfig, and every confidential transfer then needs two
-// more proofs plus a withheld fee ciphertext somebody has to decrypt later.
-// nothing in the rubric asks for that, so the fee stays on mint A.
+// no transfer fee on this one. a mint with both also needs
+// ConfidentialTransferFeeConfig, which is two extra proofs per transfer.
 
 use std::sync::Arc;
 
@@ -72,12 +65,9 @@ pub async fn create(
             &mint.pubkey(),
             Some(&authority),
         )?,
-        // the regulator's lever. moves tokens out of any account without asking
-        // the owner.
+        // moves tokens out of any account without asking the owner
         initialize_permanent_delegate(&spl_token_2022_interface::id(), &mint.pubkey(), seizer)?,
-        // auto_approve_new_accounts: false IS approve_policy = manual. every
-        // account has to be approved by the issuer after it configures itself,
-        // before it can receive anything.
+        // false here is approve_policy = manual
         ct::initialize_mint(
             &spl_token_2022_interface::id(),
             &mint.pubkey(),

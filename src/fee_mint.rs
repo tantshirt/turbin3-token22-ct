@@ -1,9 +1,5 @@
-// task 1. the remittance mint: a fee on every transfer, metadata on the mint
-// itself, new accounts frozen until KYC, and a way to close the mint later.
-//
-// built out of raw instructions on purpose. a client helper would do the same
-// thing, but it does it inside the crate where you can't see the sizing or the
-// ordering, and those two things are what this task is actually about.
+// the remittance mint. raw instructions rather than a helper so the sizing and
+// the instruction order are actually visible.
 
 use std::sync::Arc;
 
@@ -24,8 +20,7 @@ pub struct FeeMintConfig {
     pub maximum_fee: u64,
 }
 
-// every authority is the payer here. a real issuer would split these across
-// separate keys, but that isn't what's graded and it would double the setup.
+// payer is every authority. a real issuer would split these up.
 pub async fn create(
     rpc: &Arc<RpcClient>,
     payer: &Keypair,
@@ -34,9 +29,7 @@ pub async fn create(
 ) -> anyhow::Result<Address> {
     let authority = payer.pubkey();
 
-    // TokenMetadata is deliberately not in this list. it's variable length, so
-    // try_calculate_account_len refuses it, and it gets written in a second
-    // transaction that reallocs the mint.
+    // no TokenMetadata here, it's variable length and goes in a second tx
     let extensions = [
         ExtensionType::TransferFeeConfig,
         ExtensionType::MetadataPointer,
@@ -44,14 +37,12 @@ pub async fn create(
         ExtensionType::MintCloseAuthority,
     ];
 
-    // the whole sizing story. don't hand compute 82 plus the TLV records, this
-    // also pads a mint that would otherwise land exactly on Multisig::LEN.
+    // don't hand compute this, it also pads mints that collide with Multisig::LEN
     let space = ExtensionType::try_calculate_account_len::<Mint>(&extensions)?;
     let rent = rpc.get_minimum_balance_for_rent_exemption(space).await?;
 
-    // order matters and it isn't style. InitializeMint stamps the account type
-    // byte, and after that every extension init sees an initialized mint and
-    // refuses. so all four go first and InitializeMint goes last.
+    // InitializeMint stamps the account type byte and every extension init
+    // refuses after that, so it goes last
     let instructions = vec![
         solana_system_interface::instruction::create_account(
             &payer.pubkey(),
@@ -68,8 +59,7 @@ pub async fn create(
             config.fee_basis_points,
             config.maximum_fee,
         )?,
-        // pointed at the mint itself, so a wallet reads the name and symbol off
-        // the same account and never has to trust an off chain list.
+        // points at the mint itself so wallets don't need an off chain list
         metadata_pointer::instruction::initialize(
             &spl_token_2022_interface::id(),
             &mint.pubkey(),
