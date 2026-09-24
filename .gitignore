@@ -1,0 +1,19 @@
+target/
+.anchor
+test-ledger
+node_modules
+.DS_Store
+
+# keys and secrets
+id.json
+*-keypair.json
+.env
+.env.*
+
+# my stuff, not theirs
+notes/
+*cheat*sheet*
+*.pdf
+scratch/
+*.mov
+*.mp4

@@ -1,0 +1,388 @@
+// task 6. the whole confidential lifecycle, in the order it has to happen:
+//
+//   create ATA        anyone can pay, the owner doesn't even sign
+//   Reallocate        make room for the ConfidentialTransferAccount extension
+//   ConfigureAccount  owner only, nobody else can do it
+//   ApproveAccount    the issuer, because this mint is approve_policy = manual
+//   Deposit           public balance -> PENDING
+//   ApplyPending      pending -> AVAILABLE
+//   Transfer          available -> the other guy's PENDING
+//   ApplyPending      again, on the receiving side
+//   Withdraw          available -> public balance
+//
+// the two apply steps are what people skip. a deposit or an incoming transfer
+// lands in pending, and pending is not spendable. withdraw builds its proof off
+// the AVAILABLE ciphertext, so skipping apply means proving something about the
+// wrong number and it falls over before it's even sent.
+
+use std::sync::Arc;
+
+use solana_address::Address;
+use solana_keypair::Keypair;
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_signer::Signer;
+use solana_zk_sdk::{
+    encryption::{auth_encryption::AeKey, derivation::derive_confidential_keys, elgamal::{ElGamalKeypair, ElGamalPubkey}},
+    zk_elgamal_proof_program::pubkey_validity::build_pubkey_validity_proof_data,
+};
+use spl_token_2022_interface::{
+    extension::{
+        confidential_transfer::{instruction as ct, ConfidentialTransferAccount},
+        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
+    },
+    state::{Account, Mint},
+};
+use solana_zk_elgamal_proof_interface::{
+    instruction::{close_context_state, ContextStateInfo, ProofInstruction},
+    state::ProofContextState,
+    proof_data::ZkProofData,
+};
+use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
+
+use crate::{
+    ct_helpers::{ApplyPendingBalanceAccountInfo, TransferAccountInfo, WithdrawAccountInfo},
+    send, DECIMALS,
+};
+
+// both keys come out of the owner signing a fixed message, so the owner can
+// always regenerate them and nothing has to be stored. that's also the
+// structural reason ConfigureAccount is owner only: nobody else can make these.
+pub struct Keys {
+    pub elgamal: ElGamalKeypair,
+    pub ae: AeKey,
+}
+
+pub fn keys(owner: &Keypair, account: &Address) -> anyhow::Result<Keys> {
+    let (elgamal, ae) = derive_confidential_keys(owner, &account.to_bytes())
+        .map_err(|e| anyhow::anyhow!("key derivation failed: {e}"))?;
+    Ok(Keys { elgamal, ae })
+}
+
+// pull the confidential half of a token account out. copied out rather than
+// borrowed because the unpacked view borrows the raw bytes.
+async fn ct_account(
+    rpc: &Arc<RpcClient>,
+    account: &Address,
+) -> anyhow::Result<ConfidentialTransferAccount> {
+    let raw = rpc.get_account(account).await?;
+    let state = StateWithExtensions::<Account>::unpack(&raw.data)?;
+    Ok(*state.get_extension::<ConfidentialTransferAccount>()?)
+}
+
+// the ATA program sizes the account for the mint's REQUIRED extensions only, and
+// ConfidentialTransferAccount is optional, so it isn't in there. the token-2022
+// source says it outright: "The caller is expected to use the Reallocate
+// instruction to ensure there is sufficient room". skip this and ConfigureAccount
+// just says InvalidAccountData and leaves you guessing.
+pub async fn make_room(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    owner: &Keypair,
+) -> anyhow::Result<()> {
+    let ix = spl_token_2022_interface::instruction::reallocate(
+        &spl_token_2022_interface::id(),
+        account,
+        &payer.pubkey(),
+        &owner.pubkey(),
+        &[],
+        &[ExtensionType::ConfidentialTransferAccount],
+    )?;
+    let _ = mint;
+    send(rpc, payer, &[ix], &[payer, owner]).await
+}
+
+
+// a transfer's three proofs, and a withdraw's two, are way past the 1232 byte
+// transaction limit if you inline them. 2284 bytes for one withdraw. so each
+// proof gets verified into its own throwaway account first, the token
+// instruction just points at those accounts, and then they get closed and the
+// rent comes back.
+async fn verify_into_context<T, U>(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    proof_instruction: ProofInstruction,
+    proof_data: &T,
+) -> anyhow::Result<Keypair>
+where
+    T: bytemuck::Pod + ZkProofData<U>,
+    U: bytemuck::Pod,
+{
+    let context = Keypair::new();
+    let space = std::mem::size_of::<ProofContextState<U>>();
+    let rent = rpc.get_minimum_balance_for_rent_exemption(space).await?;
+
+    let create = solana_system_interface::instruction::create_account(
+        &payer.pubkey(),
+        &context.pubkey(),
+        rent,
+        space as u64,
+        &solana_zk_elgamal_proof_interface::id(),
+    );
+    let verify = proof_instruction.encode_verify_proof(
+        Some(ContextStateInfo {
+            context_state_account: &context.pubkey(),
+            context_state_authority: &payer.pubkey(),
+        }),
+        proof_data,
+    );
+
+    // the create and the verify go in separate transactions, because the proof
+    // data itself is what's too big to share a transaction with anything else.
+    send(rpc, payer, &[create], &[payer, &context]).await?;
+    send(rpc, payer, &[verify], &[payer]).await?;
+    Ok(context)
+}
+
+async fn close_contexts(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    contexts: &[Keypair],
+) -> anyhow::Result<()> {
+    for c in contexts {
+        let ix = close_context_state(
+            ContextStateInfo {
+                context_state_account: &c.pubkey(),
+                context_state_authority: &payer.pubkey(),
+            },
+            &payer.pubkey(),
+        );
+        send(rpc, payer, &[ix], &[payer]).await?;
+    }
+    Ok(())
+}
+
+pub async fn configure(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    owner: &Keypair,
+    keys: &Keys,
+    max_pending: Option<u64>,
+) -> anyhow::Result<()> {
+    make_room(rpc, payer, mint, account, owner).await?;
+
+    // proves the ElGamal pubkey going into the account is well formed. it's
+    // generated from the secret key, so only the owner can produce it.
+    let proof = build_pubkey_validity_proof_data(&keys.elgamal)
+        .map_err(|e| anyhow::anyhow!("pubkey validity proof failed: {e}"))?;
+
+    let ixs = ct::configure_account(
+        &spl_token_2022_interface::id(),
+        account,
+        mint,
+        &keys.ae.encrypt(0).into(),
+        max_pending.unwrap_or(65536),
+        &owner.pubkey(),
+        &[],
+        ProofLocation::InstructionOffset(1.try_into().unwrap(), &proof),
+    )?;
+
+    send(rpc, payer, &ixs, &[payer, owner]).await
+}
+
+// only needed because this mint is auto_approve_new_accounts: false.
+pub async fn approve(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    ct_authority: &Keypair,
+) -> anyhow::Result<()> {
+    let ix = ct::approve_account(
+        &spl_token_2022_interface::id(),
+        account,
+        mint,
+        &ct_authority.pubkey(),
+        &[],
+    )?;
+    send(rpc, payer, &[ix], &[payer, ct_authority]).await
+}
+
+pub async fn deposit(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    owner: &Keypair,
+    amount: u64,
+) -> anyhow::Result<()> {
+    let ix = ct::deposit(
+        &spl_token_2022_interface::id(),
+        account,
+        mint,
+        amount,
+        DECIMALS,
+        &owner.pubkey(),
+        &[],
+    )?;
+    send(rpc, payer, &[ix], &[payer, owner]).await
+}
+
+pub async fn apply_pending(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    owner: &Keypair,
+    keys: &Keys,
+) -> anyhow::Result<()> {
+    let ct = ct_account(rpc, account).await?;
+    let info = ApplyPendingBalanceAccountInfo::new(&ct);
+
+    let expected = info.pending_balance_credit_counter();
+    let new_balance = info
+        .new_decryptable_available_balance(keys.elgamal.secret(), &keys.ae)
+        .map_err(|e| anyhow::anyhow!("couldn't work out the new balance: {e}"))?;
+
+    let ix = ct::apply_pending_balance(
+        &spl_token_2022_interface::id(),
+        account,
+        expected,
+        &new_balance.into(),
+        &owner.pubkey(),
+        &[],
+    )?;
+    let _ = mint;
+    send(rpc, payer, &[ix], &[payer, owner]).await
+}
+
+pub async fn transfer(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    from: &Address,
+    to: &Address,
+    owner: &Keypair,
+    keys: &Keys,
+    to_elgamal: &ElGamalPubkey,
+    amount: u64,
+) -> anyhow::Result<()> {
+    let ct = ct_account(rpc, from).await?;
+    let info = TransferAccountInfo::new(&ct);
+
+    // three proofs: equality, ciphertext validity, range. generated client side
+    // off the current available balance ciphertext.
+    let proofs = info
+        .generate_split_transfer_proof_data(amount, &keys.elgamal, &keys.ae, to_elgamal, None)
+        .map_err(|e| anyhow::anyhow!("transfer proof generation failed: {e}"))?;
+
+    let new_balance = info
+        .new_decryptable_available_balance(amount, &keys.ae)
+        .map_err(|e| anyhow::anyhow!("couldn't work out the new balance: {e}"))?;
+
+    let equality = verify_into_context(
+        rpc,
+        payer,
+        ProofInstruction::VerifyCiphertextCommitmentEquality,
+        &proofs.equality_proof_data,
+    )
+    .await?;
+    let validity = verify_into_context(
+        rpc,
+        payer,
+        ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
+        &proofs.ciphertext_validity_proof_data_with_ciphertext.proof_data,
+    )
+    .await?;
+    let range = verify_into_context(
+        rpc,
+        payer,
+        ProofInstruction::VerifyBatchedRangeProofU128,
+        &proofs.range_proof_data,
+    )
+    .await?;
+
+    let ixs = ct::transfer(
+        &spl_token_2022_interface::id(),
+        from,
+        mint,
+        to,
+        &new_balance.into(),
+        &proofs.ciphertext_validity_proof_data_with_ciphertext.ciphertext_lo,
+        &proofs.ciphertext_validity_proof_data_with_ciphertext.ciphertext_hi,
+        &owner.pubkey(),
+        &[],
+        ProofLocation::ContextStateAccount(&equality.pubkey()),
+        ProofLocation::ContextStateAccount(&validity.pubkey()),
+        ProofLocation::ContextStateAccount(&range.pubkey()),
+    )?;
+
+    send(rpc, payer, &ixs, &[payer, owner]).await?;
+    close_contexts(rpc, payer, &[equality, validity, range]).await
+}
+
+pub async fn withdraw(
+    rpc: &Arc<RpcClient>,
+    payer: &Keypair,
+    mint: &Address,
+    account: &Address,
+    owner: &Keypair,
+    keys: &Keys,
+    amount: u64,
+) -> anyhow::Result<()> {
+    let ct = ct_account(rpc, account).await?;
+    let info = WithdrawAccountInfo::new(&ct);
+
+    let proofs = info
+        .generate_proof_data(amount, &keys.elgamal, &keys.ae)
+        .map_err(|e| anyhow::anyhow!("withdraw proof generation failed, is the balance applied? {e}"))?;
+
+    let new_balance = info
+        .new_decryptable_available_balance(amount, &keys.ae)
+        .map_err(|e| anyhow::anyhow!("couldn't work out the new balance: {e}"))?;
+
+    let equality = verify_into_context(
+        rpc,
+        payer,
+        ProofInstruction::VerifyCiphertextCommitmentEquality,
+        &proofs.equality_proof_data,
+    )
+    .await?;
+    let range = verify_into_context(
+        rpc,
+        payer,
+        ProofInstruction::VerifyBatchedRangeProofU64,
+        &proofs.range_proof_data,
+    )
+    .await?;
+
+    let ixs = ct::withdraw(
+        &spl_token_2022_interface::id(),
+        account,
+        mint,
+        amount,
+        DECIMALS,
+        &new_balance.into(),
+        &owner.pubkey(),
+        &[],
+        ProofLocation::ContextStateAccount(&equality.pubkey()),
+        ProofLocation::ContextStateAccount(&range.pubkey()),
+    )?;
+
+    send(rpc, payer, &ixs, &[payer, owner]).await?;
+    close_contexts(rpc, payer, &[equality, range]).await
+}
+
+pub async fn pending_counter(rpc: &Arc<RpcClient>, account: &Address) -> anyhow::Result<u64> {
+    Ok(ct_account(rpc, account).await?.pending_balance_credit_counter.into())
+}
+
+pub async fn available_balance(
+    rpc: &Arc<RpcClient>,
+    account: &Address,
+    keys: &Keys,
+) -> anyhow::Result<u64> {
+    let ct = ct_account(rpc, account).await?;
+    keys.ae
+        .decrypt(&ct.decryptable_available_balance.try_into()?)
+        .ok_or_else(|| anyhow::anyhow!("couldn't decrypt the available balance"))
+}
+
+pub async fn is_approved(rpc: &Arc<RpcClient>, account: &Address) -> anyhow::Result<bool> {
+    Ok(bool::from(ct_account(rpc, account).await?.approved))
+}
+
+pub fn _mint_marker(_: &Mint) {}
